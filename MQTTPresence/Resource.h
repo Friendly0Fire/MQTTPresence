@@ -9,6 +9,7 @@
 #define IDR_MAINFRAME           128
 
 #define IDM_EXIT                124
+#define IDM_SETTINGS            125
 
 #define IDI_NOTIFICATIONICON    207
 #define IDC_MQTTPRESENCE        208

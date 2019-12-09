@@ -1,5 +1,6 @@
 [requires]
 mqtt_cpp/7.0.1@friendlyfire/packaging
+rapidyaml/0.3@friendlyfire/packaging
 
 [generators]
 visual_studio
