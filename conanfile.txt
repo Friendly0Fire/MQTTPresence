@@ -1,6 +1,7 @@
 [requires]
 mqtt_cpp/7.0.1@friendlyfire/packaging
 rapidyaml/0.3@friendlyfire/packaging
+cxxopts/2.2.0@friendlyfire/packaging
 
 [generators]
 visual_studio
