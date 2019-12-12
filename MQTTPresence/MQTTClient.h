@@ -33,8 +33,10 @@ public:
 
         client_->set_connack_handler(
             [client, &topic = this->topic_](bool sp, MQTT_NS::connect_return_code connack_return_code) {
-                if(auto c = client.lock(); c)
-                    c->publish(topic + "/active", "true");
+                if(auto c = client.lock(); c) {
+                    c->publish(topic + "/user_active", "true");
+                    c->publish(topic + "/sound_active", "false");
+                }
                 return true;
             }
         );
@@ -44,6 +46,14 @@ public:
         thread_ = std::thread([&]() {
             ioc_.run();
         });
+    }
+
+    void user_active(bool state) const {
+        client_->publish(topic_ + "/user_active", state ? "true" : "false");
+    }
+
+    void sound_active(bool state) const {
+        client_->publish(topic_ + "/sound_active", state ? "true" : "false");
     }
 
 protected:

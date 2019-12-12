@@ -28,4 +28,16 @@ inline std::string ws2s(const std::wstring& wstr) {
     return converterX.to_bytes(wstr);
 }
 
+/// <summary>
+/// Converts a std::string into the equivalent std::wstring.
+/// </summary>
+/// <param name="str">The std::string.</param>
+/// <returns>The converted std::wstring.</returns>
+inline std::wstring s2ws(const std::string& str) {
+    typedef std::codecvt_utf8<wchar_t>           convert_typeX;
+    std::wstring_convert<convert_typeX, wchar_t> converterX;
+
+    return converterX.from_bytes(str);
+}
+
 DEF_TSTR(g_unique_identifier, "MQTTPresenceWindows");

@@ -33,6 +33,9 @@
     <ClInclude Include="MQTTClient.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="VolumeCheck.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="MQTTPresence.cpp">

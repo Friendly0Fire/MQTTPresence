@@ -5,6 +5,7 @@
 #include <ryml_std.hpp>
 #include <windows.h>
 #include <windowsx.h>
+#include <winnt.h>
 #include <shellapi.h>
 #include <commctrl.h>
 #include <strsafe.h>
@@ -15,6 +16,7 @@
 #include <tchar.h>
 #include <vector>
 #include "Registry.h"
+#include "VolumeCheck.h"
 
 #pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
@@ -25,9 +27,15 @@ HINSTANCE g_hinst = nullptr;
 
 UINT const WMAPP_NOTIFYCALLBACK = WM_APP + 1;
 
+mqtt_client* g_mqtt = nullptr;
 TCHAR g_config_path[MAX_PATH];
 std::string g_mqtt_host, g_mqtt_port, g_mqtt_topic, g_mqtt_username, g_mqtt_password;
+std::vector<std::string> g_volume_processes;
 bool g_startup = false, g_elevated = false;
+bool g_enable_volume = true, g_enable_activity = true;
+bool g_volume_check_all_devices = false;
+
+bool g_user_active = true, g_sound_active = false;
 
 // Forward declarations of functions included in this code module:
 void RegisterWindowClass(PCWSTR pszClassName, PCWSTR pszMenuName, WNDPROC lpfnWndProc);
@@ -150,22 +158,51 @@ void load_config() {
         std::stringstream ss;
         ss << config.rdbuf();
         auto tree = ryml::parse(c4::to_csubstr(ss.str()));
-        g_mqtt_host = from_substr(tree["mqttHost"].val());
-        g_mqtt_port = from_substr(tree["mqttPort"].val());
-        g_mqtt_topic = from_substr(tree["mqttTopic"].val());
-        g_mqtt_username = from_substr(tree["mqttUsername"].val());
-        g_mqtt_password = from_substr(tree["mqttPassword"].val());
+
+        auto read_node = [](const c4::yml::NodeRef& node, const std::string& def) {
+            if(node.valid() && !node.is_seed() && node.has_val())
+                return from_substr(node.val());
+            else
+                return def;
+        };
+
+        g_mqtt_host = read_node(tree["mqttHost"], "localhost");
+        g_mqtt_port = read_node(tree["mqttPort"], "1883");
+        g_mqtt_topic = read_node(tree["mqttTopic"], "winmqttpresence");
+        g_mqtt_username = read_node(tree["mqttUsername"], "");
+        g_mqtt_password = read_node(tree["mqttPassword"], "");
+
+        auto processes = tree["volumeProcesses"];
+        if(processes.valid() && !processes.is_seed() && processes.is_seq()) {
+            for(auto proc : processes.children())
+                g_volume_processes.push_back(from_substr(proc.val()));
+        }
+
+        auto read_node_bool = [](const c4::yml::NodeRef& node, bool def) {
+            if(node.valid() && !node.is_seed() && node.has_val())
+                return node.val() == "true";
+            else
+                return def;
+        };
+        
+        g_enable_volume = read_node_bool(tree["enableVolumeCheck"], true);
+        g_enable_activity = read_node_bool(tree["enableActivityCheck"], true);
+        g_volume_check_all_devices = read_node_bool(tree["enableVolumeCheckAllDevices"], false);
     }
     else {
         std::ofstream out(g_config_path);
         out <<
             R"MARK(
 {
-    "mqttHost": "localhost",
-    "mqttPort": 1883,
-    "mqttUsername": "",
-    "mqttPassword": "",
-    "mqttTopic": "mqttpresence"
+    "mqttHost": "localhost", // defaults to 'localhost'
+    "mqttPort": 1883, // defaults to 1883
+    "mqttUsername": "", // remove or leave blank if unneeded
+    "mqttPassword": "", // remove or leave blank if unneeded
+    "mqttTopic": "winmqttpresence", // defaults to 'winmqttpresence'
+    "enableVolumeCheck": true, // defaults to true
+    "volumeProcesses": [], // if empty, all processes are checked; otherwise, only check a list of executables (with extensions)
+    "enableActivityCheck": true, // defaults to true
+    "enableVolumeCheckAllDevices": false // defaults to false; if true, all audio output devices are checked for sound output, otherwise only the default one is
 }
 )MARK";
         out.close();
@@ -202,6 +239,7 @@ void parse_options(int argc, LPWSTR* wargv) {
 }
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int /*nCmdShow*/) {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     GetModuleFileName(nullptr, g_program_path, MAX_PATH);
     g_startup = get_startup();
     g_elevated = is_elevated();
@@ -225,9 +263,34 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int /*nCm
     HWND hwnd = CreateWindow(CHOOSE_TSTR(g_unique_identifier), window_title, WS_OVERLAPPEDWINDOW,
                              CW_USEDEFAULT, 0, 250, 200, NULL, NULL, g_hinst, nullptr);
     if (hwnd) {
+        auto powerNotify = g_enable_activity ? RegisterPowerSettingNotification(hwnd, &GUID_SESSION_USER_PRESENCE, DEVICE_NOTIFY_WINDOW_HANDLE) : nullptr;
+
         ShowWindow(hwnd, SW_HIDE);
 
         mqtt_client mqtt(g_mqtt_host, g_mqtt_port, g_mqtt_username, g_mqtt_password, g_mqtt_topic);
+        g_mqtt = &mqtt;
+
+        volume_check volume;
+        std::atomic<bool> volume_thread_signal = true;
+        std::thread volume_thread;
+        if(g_enable_volume) {
+            volume = volume_check(g_volume_check_all_devices);
+            for(const auto& proc : g_volume_processes)
+                volume.add_process_name(s2ws(proc));
+
+            volume_thread = std::thread([&volume, &volume_thread_signal]() {
+                using namespace std::chrono_literals;
+
+                while(volume_thread_signal) {
+                    bool new_active = volume.poll();
+                    if(new_active != g_sound_active) {
+                        g_sound_active = new_active;
+                        g_mqtt->sound_active(g_sound_active);
+                    }
+                    std::this_thread::sleep_for(5s);
+                }
+            });
+        }
 
         mqtt.connect();
 
@@ -236,7 +299,16 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int /*nCm
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
+
+        if(g_enable_volume)
+            volume_thread_signal = false;
+
+        if(g_enable_activity)
+            UnregisterPowerSettingNotification(powerNotify);
     }
+
+    CoUninitialize();
+
     return 0;
 }
 
@@ -329,23 +401,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
         default:
             return DefWindowProc(hwnd, message, wParam, lParam);
         }
-    }
-    break;
-
+    } break;
     case WMAPP_NOTIFYCALLBACK:
         switch (LOWORD(lParam)) {
         case WM_CONTEXTMENU: {
             POINT const pt = {GET_X_LPARAM(wParam), GET_Y_LPARAM(wParam)};
             ShowContextMenu(hwnd, pt);
-        }
-        break;
-        }
-        break;
-
+        } break;
+        } break;
     case WM_DESTROY:
         DeleteNotificationIcon(hwnd);
         PostQuitMessage(0);
         break;
+    case WM_POWERBROADCAST: {
+        if(wParam == PBT_POWERSETTINGCHANGE) {
+            auto data = reinterpret_cast<POWERBROADCAST_SETTING*>(lParam);
+            bool new_active = *reinterpret_cast<DWORD*>(&data->Data) != PowerUserInactive;
+            if(new_active != g_user_active) {
+                g_user_active = new_active;
+                g_mqtt->user_active(g_user_active);
+            }
+        }
+    } break;
     default:
         return DefWindowProc(hwnd, message, wParam, lParam);
     }
