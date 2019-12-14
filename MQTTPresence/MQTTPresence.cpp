@@ -37,6 +37,8 @@ bool g_volume_check_all_devices = false;
 
 bool g_user_active = true, g_sound_active = false;
 
+std::atomic<bool> g_running = true;
+
 // Forward declarations of functions included in this code module:
 void RegisterWindowClass(PCWSTR pszClassName, PCWSTR pszMenuName, WNDPROC lpfnWndProc);
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -280,12 +282,14 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int /*nCm
 
             volume_thread = std::thread([&volume, &volume_thread_signal]() {
                 using namespace std::chrono_literals;
+                std::this_thread::sleep_for(5s);
 
                 while(volume_thread_signal) {
                     bool new_active = volume.poll();
                     if(new_active != g_sound_active) {
                         g_sound_active = new_active;
-                        g_mqtt->sound_active(g_sound_active);
+                        if(g_mqtt)
+                            g_mqtt->sound_active(g_sound_active);
                     }
                     std::this_thread::sleep_for(5s);
                 }
@@ -295,13 +299,15 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int /*nCm
         mqtt.connect();
 
         MSG msg;
-        while (GetMessage(&msg, nullptr, 0, 0)) {
+        while (g_running && GetMessage(&msg, nullptr, 0, 0)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
 
         if(g_enable_volume)
             volume_thread_signal = false;
+        if(volume_thread.joinable())
+            volume_thread.join();
 
         if(g_enable_activity)
             UnregisterPowerSettingNotification(powerNotify);
@@ -412,6 +418,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
     case WM_DESTROY:
         DeleteNotificationIcon(hwnd);
         PostQuitMessage(0);
+        break;
+    case WM_ENDSESSION:
+        g_running = false;
+        g_mqtt->disconnect();
+        g_mqtt = nullptr;
         break;
     case WM_POWERBROADCAST: {
         if(wParam == PBT_POWERSETTINGCHANGE) {

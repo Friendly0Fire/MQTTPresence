@@ -15,9 +15,17 @@ public:
         if(!client_)
             return;
 
-        client_->publish(topic_ + "/active", "false");
+        disconnect();
+    }
+
+    void disconnect() {
+        client_->publish(topic_ + "/user_active", "false");
+        client_->publish(topic_ + "/sound_active", "false");
+
         ioc_.stop();
         thread_.join();
+
+        client_.reset();
     }
 
     void connect() {
