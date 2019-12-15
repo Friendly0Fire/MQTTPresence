@@ -30,11 +30,6 @@ public:
         } else {
             auto& dev = devices_.emplace_back();
             device_enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, dev.GetAddressOf());
-            auto& session_manager = session_managers_.emplace_back();
-            dev->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
-                          reinterpret_cast<void**>(session_manager.GetAddressOf()));
-            auto& session_enumerator = session_enumerators_.emplace_back();
-            session_manager->GetSessionEnumerator(session_enumerator.GetAddressOf());
         }
     }
 
@@ -43,16 +38,22 @@ public:
     }
 
     [[nodiscard]] bool poll() const {
-        for(const auto& enumerator : session_enumerators_)
-            if(poll_device(enumerator))
+        for(const auto& device : devices_)
+            if(poll_device(device))
                 return true;
 
         return false;
     }
 
 private:
-    [[nodiscard]] bool poll_device(const Microsoft::WRL::ComPtr<IAudioSessionEnumerator>& enumerator) const {
+    [[nodiscard]] bool poll_device(const Microsoft::WRL::ComPtr<IMMDevice>& device) const {
         using namespace Microsoft::WRL;
+
+        ComPtr<IAudioSessionManager2> session_manager;
+        device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
+                      reinterpret_cast<void**>(session_manager.GetAddressOf()));
+        ComPtr<IAudioSessionEnumerator> enumerator;
+        session_manager->GetSessionEnumerator(enumerator.GetAddressOf());
 
         int session_count;
         enumerator->GetCount(&session_count);
@@ -100,7 +101,5 @@ private:
     }
 
     std::vector<Microsoft::WRL::ComPtr<IMMDevice>> devices_;
-    std::vector<Microsoft::WRL::ComPtr<IAudioSessionManager2>> session_managers_;
-    std::vector<Microsoft::WRL::ComPtr<IAudioSessionEnumerator>> session_enumerators_;
     std::unordered_set<std::wstring> proc_names_;
 };

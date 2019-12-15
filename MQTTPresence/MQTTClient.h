@@ -30,7 +30,6 @@ public:
 
     void connect() {
         client_ = MQTT_NS::make_sync_client(ioc_, host_, port_);
-        std::weak_ptr<inner_client_t::element_type> client(client_);
 
         client_->set_client_id(g_unique_identifier);
         if (!username_.empty())
@@ -40,10 +39,11 @@ public:
         client_->set_clean_session(true);
 
         client_->set_connack_handler(
-            [client, &topic = this->topic_](bool sp, MQTT_NS::connect_return_code connack_return_code) {
-                if(auto c = client.lock(); c) {
-                    c->publish(topic + "/user_active", "true");
-                    c->publish(topic + "/sound_active", "false");
+            [this](bool sp, MQTT_NS::connect_return_code connack_return_code) {
+                if(!loaded_ && client_) {
+                    user_active(true);
+                    sound_active(false);
+                    loaded_ = true;
                 }
                 return true;
             }
@@ -57,11 +57,13 @@ public:
     }
 
     void user_active(bool state) const {
-        client_->publish(topic_ + "/user_active", state ? "true" : "false");
+        client_->publish(topic_ + "/user_active", state ? "true" : "false", MQTT_NS::qos::at_least_once, true);
+        OutputDebugStringA((std::string("user_active = ") + (state ? "true" : "false") + "\n").c_str());
     }
 
     void sound_active(bool state) const {
-        client_->publish(topic_ + "/sound_active", state ? "true" : "false");
+        client_->publish(topic_ + "/sound_active", state ? "true" : "false", MQTT_NS::qos::at_least_once, true);
+        OutputDebugStringA((std::string("sound_active = ") + (state ? "true" : "false") + "\n").c_str());
     }
 
 protected:
@@ -69,4 +71,5 @@ protected:
     const std::string host_, port_, username_, password_, topic_;
     inner_client_t client_;
     std::thread thread_;
+    bool loaded_ = false;
 };
