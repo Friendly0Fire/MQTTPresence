@@ -20,31 +20,30 @@
 
 #pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
+// Constants //
 TCHAR g_startup_reg_key[] = TEXT("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run");
-TCHAR g_program_path[MAX_PATH];
-
-HINSTANCE g_hinst = nullptr;
-
 UINT const WMAPP_NOTIFYCALLBACK = WM_APP + 1;
 
+// Load Once //
+TCHAR g_program_path[MAX_PATH];
+bool g_startup = false, g_elevated = false;
+HINSTANCE g_hinst = nullptr;
+
+// Main Loop //
+std::atomic<bool> g_running = true;
+std::atomic<bool> g_restart = true;
+
 mqtt_client* g_mqtt = nullptr;
+TCHAR g_config_dir[MAX_PATH];
 TCHAR g_config_path[MAX_PATH];
+HANDLE g_config_watch;
 std::string g_mqtt_host, g_mqtt_port, g_mqtt_topic, g_mqtt_username, g_mqtt_password;
 std::vector<std::string> g_volume_processes;
-bool g_startup = false, g_elevated = false;
 bool g_enable_volume = true, g_enable_activity = true;
 bool g_volume_check_all_devices = false;
 
 bool g_user_active = true, g_sound_active = false;
 
-std::atomic<bool> g_running = true;
-
-// Forward declarations of functions included in this code module:
-void RegisterWindowClass(PCWSTR pszClassName, PCWSTR pszMenuName, WNDPROC lpfnWndProc);
-LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
-void ShowContextMenu(HWND hwnd, POINT pt);
-BOOL AddNotificationIcon(HWND hwnd);
-BOOL DeleteNotificationIcon(HWND hwnd);
 
 template <typename... Args>
 void fatal_message_box(Args&&... args) {
@@ -144,15 +143,16 @@ inline void toggle_startup() {
 }
 
 void load_config() {
-    if (FAILED(SHGetFolderPath(nullptr, CSIDL_APPDATA, nullptr, 0, g_config_path)))
+    if (FAILED(SHGetFolderPath(nullptr, CSIDL_APPDATA, nullptr, 0, g_config_dir)))
         fatal_message_box(nullptr, TEXT("Could not locate AppData folder."), TEXT("Fatal Error"), MB_OK | MB_ICONERROR);
 
-    PathAppend(g_config_path, CHOOSE_TSTR(g_unique_identifier));
+    PathAppend(g_config_dir, CHOOSE_TSTR(g_unique_identifier));
 
-    auto ret = SHCreateDirectory(nullptr, g_config_path);
+    auto ret = SHCreateDirectory(nullptr, g_config_dir);
     if (ret != ERROR_SUCCESS && ret != ERROR_ALREADY_EXISTS)
         fatal_message_box(nullptr, TEXT("Could not create config folder."), TEXT("Fatal Error"), MB_OK | MB_ICONERROR);
 
+    _tcscpy_s(g_config_path, g_config_dir);
     PathAppend(g_config_path, TEXT("config.json"));
 
     if (PathFileExists(g_config_path)) {
@@ -211,8 +211,9 @@ void load_config() {
         if (MessageBox(nullptr, TEXT("A config file has been generated. Click OK to open it."),
                        TEXT("Configuration Required"), MB_OKCANCEL | MB_ICONINFORMATION) == IDOK)
             open_file(g_config_path);
-        exit(0);
     }
+
+    g_config_watch = FindFirstChangeNotification(g_config_dir, true, FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE);
 }
 
 void parse_options(int argc, LPWSTR* wargv) {
@@ -240,84 +241,6 @@ void parse_options(int argc, LPWSTR* wargv) {
     }
 }
 
-int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int /*nCmdShow*/) {
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    GetModuleFileName(nullptr, g_program_path, MAX_PATH);
-    g_startup = get_startup();
-    g_elevated = is_elevated();
-
-    {
-        int argc;
-        auto argv = CommandLineToArgvW(lpCmdLine, &argc);
-        parse_options(argc, argv);
-        LocalFree(argv);
-    }
-
-    load_config();
-
-    g_hinst = hInstance;
-    RegisterWindowClass(g_unique_identifierW, MAKEINTRESOURCE(IDC_MQTTPRESENCE), WndProc);
-
-    // Create the main window. This could be a hidden window if you don't need
-    // any UI other than the notification icon.
-    WCHAR window_title[100];
-    LoadString(hInstance, IDS_APP_TITLE, window_title, ARRAYSIZE(window_title));
-    HWND hwnd = CreateWindow(CHOOSE_TSTR(g_unique_identifier), window_title, WS_OVERLAPPEDWINDOW,
-                             CW_USEDEFAULT, 0, 250, 200, NULL, NULL, g_hinst, nullptr);
-    if (hwnd) {
-        auto powerNotify = g_enable_activity ? RegisterPowerSettingNotification(hwnd, &GUID_SESSION_USER_PRESENCE, DEVICE_NOTIFY_WINDOW_HANDLE) : nullptr;
-
-        ShowWindow(hwnd, SW_HIDE);
-
-        mqtt_client mqtt(g_mqtt_host, g_mqtt_port, g_mqtt_username, g_mqtt_password, g_mqtt_topic);
-        g_mqtt = &mqtt;
-
-        volume_check volume;
-        std::atomic<bool> volume_thread_signal = true;
-        std::thread volume_thread;
-        if(g_enable_volume) {
-            volume = volume_check(g_volume_check_all_devices);
-            for(const auto& proc : g_volume_processes)
-                volume.add_process_name(s2ws(proc));
-
-            volume_thread = std::thread([&volume, &volume_thread_signal]() {
-                using namespace std::chrono_literals;
-                std::this_thread::sleep_for(5s);
-
-                while(volume_thread_signal) {
-                    bool new_active = volume.poll();
-                    if(new_active != g_sound_active) {
-                        g_sound_active = new_active;
-                        if(g_mqtt)
-                            g_mqtt->sound_active(g_sound_active);
-                    }
-                    std::this_thread::sleep_for(5s);
-                }
-            });
-        }
-
-        mqtt.connect();
-
-        MSG msg;
-        while (g_running && GetMessage(&msg, nullptr, 0, 0)) {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
-
-        if(g_enable_volume)
-            volume_thread_signal = false;
-        if(volume_thread.joinable())
-            volume_thread.join();
-
-        if(g_enable_activity)
-            UnregisterPowerSettingNotification(powerNotify);
-    }
-
-    CoUninitialize();
-
-    return 0;
-}
-
 void RegisterWindowClass(PCWSTR pszClassName, PCWSTR pszMenuName, WNDPROC lpfnWndProc) {
     WNDCLASSEX wcex = {sizeof(wcex)};
     wcex.style = CS_HREDRAW | CS_VREDRAW;
@@ -332,7 +255,7 @@ void RegisterWindowClass(PCWSTR pszClassName, PCWSTR pszMenuName, WNDPROC lpfnWn
 }
 
 BOOL AddNotificationIcon(HWND hwnd) {
-    NOTIFYICONDATA nid = {sizeof(nid)};
+    NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA) };
     nid.hWnd = hwnd;
     // add the icon, setting the icon, tooltip, and callback message.
     // the icon will be identified with the GUID
@@ -346,6 +269,19 @@ BOOL AddNotificationIcon(HWND hwnd) {
     // NOTIFYICON_VERSION_4 is prefered
     nid.uVersion = NOTIFYICON_VERSION_4;
     return Shell_NotifyIcon(NIM_SETVERSION, &nid);
+}
+
+void SetNotificationIconMessage(HWND hwnd, const TCHAR* msg) {
+    NOTIFYICONDATA nid = { NOTIFYICONDATA_V3_SIZE };
+    nid.hWnd = hwnd;
+    nid.uFlags = NIF_INFO;
+    nid.uID = IDI_NOTIFICATIONICON;
+    nid.uCallbackMessage = WMAPP_NOTIFYCALLBACK;
+    nid.uTimeout = 5000;
+    _tcscpy_s(nid.szInfo, msg);
+    LoadString(g_hinst, IDS_TOOLTIP, nid.szInfoTitle, ARRAYSIZE(nid.szInfoTitle));
+    
+    Shell_NotifyIcon(NIM_MODIFY, &nid);
 }
 
 BOOL DeleteNotificationIcon(HWND hwnd) {
@@ -437,5 +373,116 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
     default:
         return DefWindowProc(hwnd, message, wParam, lParam);
     }
+    return 0;
+}
+
+void mainLoop(HINSTANCE hInstance) {
+    load_config();
+
+    WCHAR window_title[100];
+    LoadString(hInstance, IDS_APP_TITLE, window_title, ARRAYSIZE(window_title));
+    HWND hwnd = CreateWindow(CHOOSE_TSTR(g_unique_identifier), window_title, WS_OVERLAPPEDWINDOW,
+                             CW_USEDEFAULT, 0, 250, 200, NULL, NULL, g_hinst, nullptr);
+    if (hwnd) {
+        auto powerNotify = g_enable_activity ? RegisterPowerSettingNotification(hwnd, &GUID_SESSION_USER_PRESENCE, DEVICE_NOTIFY_WINDOW_HANDLE) : nullptr;
+
+        ShowWindow(hwnd, SW_HIDE);
+
+        mqtt_client mqtt(g_mqtt_host, g_mqtt_port, g_mqtt_username, g_mqtt_password, g_mqtt_topic);
+        g_mqtt = &mqtt;
+
+        // ReSharper disable once CppJoinDeclarationAndAssignment
+        volume_check volume;
+        std::atomic<bool> volume_thread_signal = true;
+        std::thread volume_thread;
+        if(g_enable_volume) {
+            // ReSharper disable once CppJoinDeclarationAndAssignment
+            volume = volume_check(g_volume_check_all_devices);
+            for(const auto& proc : g_volume_processes)
+                volume.add_process_name(s2ws(proc));
+
+            volume_thread = std::thread([&volume, &volume_thread_signal]() {
+                using namespace std::chrono_literals;
+                std::this_thread::sleep_for(5s);
+
+                while(volume_thread_signal) {
+                    bool new_active = volume.poll();
+                    if(new_active != g_sound_active) {
+                        g_sound_active = new_active;
+                        if(g_mqtt)
+                            g_mqtt->sound_active(g_sound_active);
+                    }
+                    std::this_thread::sleep_for(5s);
+                }
+            });
+        }
+
+        mqtt.connect();
+        
+        std::atomic<bool> config_thread_signal = true;
+        std::thread config_thread = std::thread([&config_thread_signal, hwnd]() {
+            while(config_thread_signal) {
+                DWORD wait_status = WaitForSingleObject(g_config_watch, 10000);
+                if(wait_status == WAIT_OBJECT_0) {
+                    SetNotificationIconMessage(hwnd, TEXT("Configuration reloading..."));
+                    g_running = false;
+                    g_restart = true;
+                    break;
+                }
+                
+                FindNextChangeNotification(g_config_watch);
+            }
+        });
+
+        MSG msg;
+        while (g_running) {
+            if (MsgWaitForMultipleObjects(0, nullptr, false, 1000, QS_ALLINPUT) == WAIT_OBJECT_0) {
+                while(PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                    TranslateMessage(&msg);
+                    DispatchMessage(&msg);
+                }
+            }
+        }
+
+        volume_thread_signal = false;
+        if(volume_thread.joinable())
+            volume_thread.join();
+
+        config_thread_signal = false;
+        config_thread.join();
+
+        FindCloseChangeNotification(g_config_watch);
+
+        if(g_enable_activity)
+            UnregisterPowerSettingNotification(powerNotify);
+
+        DestroyWindow(hwnd);
+    }
+}
+
+int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int /*nCmdShow*/) {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    GetModuleFileName(nullptr, g_program_path, MAX_PATH);
+    g_hinst = hInstance;
+    g_startup = get_startup();
+    g_elevated = is_elevated();
+
+    {
+        int argc;
+        auto argv = CommandLineToArgvW(lpCmdLine, &argc);
+        parse_options(argc, argv);
+        LocalFree(argv);
+    }
+    
+    RegisterWindowClass(g_unique_identifierW, MAKEINTRESOURCE(IDC_MQTTPRESENCE), WndProc);
+
+    while(g_restart) {
+        g_running = true;
+        g_restart = false;
+        mainLoop(hInstance);
+    }
+
+    CoUninitialize();
+
     return 0;
 }
