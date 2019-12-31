@@ -422,15 +422,15 @@ void mainLoop(HINSTANCE hInstance) {
         std::atomic<bool> config_thread_signal = true;
         std::thread config_thread = std::thread([&config_thread_signal, hwnd]() {
             while(config_thread_signal) {
-                DWORD wait_status = WaitForSingleObject(g_config_watch, 10000);
+                DWORD wait_status = WaitForSingleObject(g_config_watch, 1000);
                 if(wait_status == WAIT_OBJECT_0) {
                     SetNotificationIconMessage(hwnd, TEXT("Configuration reloading..."));
                     g_running = false;
                     g_restart = true;
+
+                    FindNextChangeNotification(g_config_watch);
                     break;
                 }
-                
-                FindNextChangeNotification(g_config_watch);
             }
         });
 
@@ -440,6 +440,10 @@ void mainLoop(HINSTANCE hInstance) {
                 while(PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
                     TranslateMessage(&msg);
                     DispatchMessage(&msg);
+                    if(msg.message == WM_QUIT) {
+                        g_running = false;
+                        break;
+                    }
                 }
             }
         }

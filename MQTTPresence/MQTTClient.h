@@ -20,14 +20,14 @@ public:
     }
 
     void disconnect() {
+        disconnecting_ = true;
+        periodic_thread_.join();
+        
         user_active(false);
         sound_active(false);
 
         ioc_.stop();
         thread_.join();
-
-        disconnecting_ = true;
-        periodic_thread_.join();
 
         client_.reset();
     }
