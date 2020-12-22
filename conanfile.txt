@@ -1,7 +1,7 @@
 [requires]
-mqtt_cpp/7.0.1@friendlyfire/packaging
-rapidyaml/0.3@friendlyfire/packaging
-cxxopts/2.2.0@friendlyfire/packaging
+paho-mqtt-cpp/1.1
+rapidjson/cci.20200410
+cxxopts/2.2.1
 
 [generators]
 visual_studio

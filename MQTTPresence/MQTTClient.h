@@ -1,15 +1,66 @@
 #pragma once
 
+#include <debugapi.h>
+
 #include "MQTTPresence.h"
-#include <mqtt_client_cpp.hpp>
+#include <mqtt/client.h>
 
-class mqtt_client {
+#include <utility>
+
+class mqtt_client : public virtual mqtt::callback {
+protected:
+    enum qos {
+        AT_MOST_ONCE = 0,
+        AT_LEAST_ONCE = 1,
+        EXACTLY_ONCE = 2
+    };
+
+    enum class status {
+        DISCONNECTED = 0,
+        CONNECTED = 1,
+        DISCONNECTING = 2,
+        CONNECTING = 3
+    };
+
+    class result_callback : public virtual mqtt::iaction_listener {
+    protected:
+        using on_t = std::function<void(const mqtt::token& tok)>;
+        on_t failure_, success_;
+
+        void on_failure(const mqtt::token& tok) override {
+            failure_(tok);
+        }
+
+        void on_success(const mqtt::token& tok) override {
+            success_(tok);
+        }
+
+    public:
+        result_callback(on_t&& success, on_t&& failure)
+            : failure_(std::move(failure))
+            , success_(std::move(success)) { }
+    };
+
+    const int periodic_interval_ = 10;
+
+    const std::string host_, port_, username_, password_, topic_, will_topic_;
+    std::string will_content_;
+    std::thread periodic_;
+    mqtt::async_client_ptr client_;
+    mutable std::mutex client_lock_;
+    std::atomic<status> status_ = status::DISCONNECTED;
+    mutable bool user_active_ = true;
+    mutable bool sound_active_ = false;
+
+    void connection_lost(const mqtt::string& reason) override {
+        OutputDebugStringA((std::string("lost connection: ") + reason + "\n").c_str());
+        disconnect();
+    }
+
 public:
-    using inner_client_t = decltype(MQTT_NS::make_sync_client(std::declval<boost::asio::io_context&>(), std::string(), std::string(), MQTT_NS::protocol_version::v3_1_1));
-
-    mqtt_client(const std::string& host, const std::string& port, const std::string& username,
-                const std::string& password, const std::string& topic)
-        : host_(host), port_(port), username_(username), password_(password), topic_(topic),
+    mqtt_client(std::string host, std::string port, std::string username,
+                std::string password, std::string topic)
+        : host_(std::move(host)), port_(std::move(port)), username_(std::move(username)), password_(std::move(password)), topic_(std::move(topic)),
           will_topic_(topic + "/inactive") {}
 
     ~mqtt_client() {
@@ -20,40 +71,44 @@ public:
     }
 
     void disconnect() {
-        disconnecting_ = true;
-        periodic_thread_.join();
+        if(status_ != status::CONNECTED)
+            return;
+
+        std::lock_guard<std::mutex> client_lock_guard(client_lock_);
+
+        status_ = status::DISCONNECTING;
+
+        if(periodic_.joinable())
+            periodic_.join();
         
         user_active(false);
         sound_active(false);
 
-        ioc_.stop();
-        thread_.join();
-
+        client_->disconnect(1000)->wait();
         client_.reset();
+
+        status_ = status::DISCONNECTED;
     }
 
     void connect() {
-        using namespace MQTT_NS;
+        if(status_ != status::DISCONNECTED)
+            return;
+        
+        std::lock_guard<std::mutex> client_lock_guard(client_lock_);
 
-        client_ = make_sync_client(ioc_, host_, port_);
+        status_ = status::CONNECTING;
 
-        client_->set_client_id(g_unique_identifier);
+        client_ = std::make_unique<mqtt::async_client>(host_ + ":" + port_, g_unique_identifier);
+        client_->set_callback(*this);
+
+        mqtt::connect_options connopts;
+
         if (!username_.empty())
-            client_->set_user_name(username_);
+            connopts.set_user_name(username_);
         if (!password_.empty())
-            client_->set_password(password_);
-        client_->set_clean_session(true);
+            connopts.set_password(password_);
 
-        client_->set_connack_handler(
-            [this](bool sp, MQTT_NS::connect_return_code connack_return_code) {
-                if(!loaded_ && client_) {
-                    user_active(true);
-                    sound_active(false);
-                    loaded_ = true;
-                }
-                return true;
-            }
-        );
+        connopts.set_clean_start(true);
 
         {
             auto now = std::chrono::system_clock::now();
@@ -63,46 +118,78 @@ public:
             will_content_ = buf;
         }
 
-        will will(buffer(string_view(will_topic_)), ""_mb, true, MQTT_NS::qos::at_least_once);
-        client_->set_will(will);
+        mqtt::will_options willopts;
+        willopts.set_topic(will_topic_);
+        willopts.set_payload(will_content_);
+        willopts.set_retained(true);
+        willopts.set_qos(qos::AT_LEAST_ONCE);
 
-        client_->connect();
-        
-        thread_ = std::thread([&]() {
-            ioc_.run();
-        });
+        connopts.set_will(willopts);
 
-        periodic_thread_ = std::thread([&]() {
-            using namespace std::chrono_literals;
-            while(!disconnecting_) {
-                for(int i = 0; i < 10 && !disconnecting_; i++)
+        try {
+            client_->connect(connopts);
+
+            status_ = status::CONNECTED;
+
+            user_active(true);
+            sound_active(false);
+
+            periodic_ = std::thread([&]() {
+                using namespace std::chrono_literals;
+
+                int i = 0;
+                while(status_ == status::CONNECTED) {
+                    if(i >= periodic_interval_) {
+                        i = 0;
+
+                        user_active(user_active_);
+                        sound_active(sound_active_);
+                    }
+
+                    i++;
                     std::this_thread::sleep_for(1s);
+                }
+            });
+        } catch(const mqtt::exception& ex) {
+            OutputDebugStringA((std::string("failed to connect: ") + ex.what() + "\n").c_str());
+            if(periodic_.joinable())
+                periodic_.join();
 
-                user_active(user_active_);
-                sound_active(sound_active_);
-            }
-        });
+            client_.reset();
+            status_ = status::DISCONNECTED;
+        }
     }
 
     void user_active(bool state) const {
+        std::lock_guard<std::mutex> client_lock_guard(client_lock_);
+        
         user_active_ = state;
-        client_->publish(topic_ + "/user_active", state ? "true" : "false", MQTT_NS::qos::at_least_once, true);
+        if(status_ != status::CONNECTED)
+            return;
+
         OutputDebugStringA((std::string("user_active = ") + (state ? "true" : "false") + "\n").c_str());
+
+        try {
+            client_->publish(topic_ + "/user_active", state ? "true" : "false", qos::AT_LEAST_ONCE, true);
+        } catch(const mqtt::exception& ex) {
+            OutputDebugStringA((std::string("failed: ") + ex.what() + "\n").c_str());
+        }
     }
 
     void sound_active(bool state) const {
+        std::lock_guard<std::mutex> client_lock_guard(client_lock_);
+        
         sound_active_ = state;
-        client_->publish(topic_ + "/sound_active", state ? "true" : "false", MQTT_NS::qos::at_least_once, true);
-        OutputDebugStringA((std::string("sound_active = ") + (state ? "true" : "false") + "\n").c_str());
-    }
+        if(status_ != status::CONNECTED)
+            return;
 
-protected:
-    boost::asio::io_context ioc_;
-    const std::string host_, port_, username_, password_, topic_, will_topic_;
-    std::string will_content_;
-    inner_client_t client_;
-    std::thread thread_, periodic_thread_;
-    bool loaded_ = false, disconnecting_ = false;
-    mutable bool user_active_ = true;
-    mutable bool sound_active_ = false;
+        OutputDebugStringA((std::string("sound_active = ") + (state ? "true" : "false") + "\n").c_str());
+
+        try {
+            client_->publish(topic_ + "/sound_active", state ? "true" : "false", qos::AT_LEAST_ONCE, true);
+        } catch(const mqtt::exception& ex) {
+            OutputDebugStringA((std::string("failed: ") + ex.what() + "\n").c_str());
+        }
+
+    }
 };
