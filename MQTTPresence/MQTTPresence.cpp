@@ -1,22 +1,24 @@
-#include "MQTTPresence.h"
-#include "MQTTClient.h"
-
-#include <ryml.hpp>
-#include <ryml_std.hpp>
-#include <windows.h>
+#include "framework.h"
 #include <windowsx.h>
-#include <winnt.h>
 #include <shellapi.h>
 #include <commctrl.h>
 #include <strsafe.h>
 #include <Shlobj.h>
 #include <Shlwapi.h>
+
+#include "MQTTPresence.h"
+#include "MQTTClient.h"
+
 #include <fstream>
-#include <cxxopts.hpp>
-#include <tchar.h>
 #include <vector>
+
+#include <rapidjson/document.h>
+#include <rapidjson/istreamwrapper.h>
+#include <cxxopts.hpp>
+
 #include "Registry.h"
 #include "VolumeCheck.h"
+
 
 #pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
@@ -49,10 +51,6 @@ template <typename... Args>
 void fatal_message_box(Args&&... args) {
     MessageBox(std::forward<Args>(args)...);
     exit(1);
-}
-
-std::string from_substr(const c4::csubstr& s) {
-    return std::string(s.str, s.size());
 }
 
 enum class elevated_commands_t {
@@ -157,39 +155,40 @@ void load_config() {
 
     if (PathFileExists(g_config_path)) {
         std::ifstream config(g_config_path);
-        std::stringstream ss;
-        ss << config.rdbuf();
-        auto tree = ryml::parse(c4::to_csubstr(ss.str()));
+        rapidjson::IStreamWrapper config_isw(config);
+        rapidjson::Document doc;
+        doc.ParseStream(config_isw);
 
-        auto read_node = [](const c4::yml::NodeRef& node, const std::string& def) {
-            if(node.valid() && !node.is_seed() && node.has_val())
-                return from_substr(node.val());
+        auto load_val = [&](const char* name, const std::string& def) {
+            if(doc.HasMember(name) && doc[name].IsString())
+                return std::string(doc[name].GetString());
             else
                 return def;
         };
 
-        g_mqtt_host = read_node(tree["mqttHost"], "localhost");
-        g_mqtt_port = read_node(tree["mqttPort"], "1883");
-        g_mqtt_topic = read_node(tree["mqttTopic"], "winmqttpresence");
-        g_mqtt_username = read_node(tree["mqttUsername"], "");
-        g_mqtt_password = read_node(tree["mqttPassword"], "");
+        g_mqtt_host = load_val("mqttHost", "localhost");
+        g_mqtt_port = load_val("mqttPort", "1883");
+        g_mqtt_topic = load_val("mqttTopic", "winmqttpresence");
+        g_mqtt_username = load_val("mqttUsername", "");
+        g_mqtt_password = load_val("mqttPassword", "");
 
-        auto processes = tree["volumeProcesses"];
-        if(processes.valid() && !processes.is_seed() && processes.is_seq()) {
-            for(auto proc : processes.children())
-                g_volume_processes.push_back(from_substr(proc.val()));
+        if(doc.HasMember("volumeProcesses")) {
+            const auto& processes = doc["volumeProcesses"];
+            if(processes.IsArray()) {
+                for(const auto& proc : processes.GetArray()) {
+                    if(proc.IsString())
+                        g_volume_processes.push_back(proc.GetString());
+                }
+            }
         }
 
-        auto read_node_bool = [](const c4::yml::NodeRef& node, bool def) {
-            if(node.valid() && !node.is_seed() && node.has_val())
-                return node.val() == "true";
-            else
-                return def;
+        auto load_bool = [&](const char* name, bool def) {
+            return load_val(name, def ? "true" : "false") == "true";
         };
         
-        g_enable_volume = read_node_bool(tree["enableVolumeCheck"], true);
-        g_enable_activity = read_node_bool(tree["enableActivityCheck"], true);
-        g_volume_check_all_devices = read_node_bool(tree["enableVolumeCheckAllDevices"], false);
+        g_enable_volume = load_bool("enableVolumeCheck", true);
+        g_enable_activity = load_bool("enableActivityCheck", true);
+        g_volume_check_all_devices = load_bool("enableVolumeCheckAllDevices", false);
     }
     else {
         std::ofstream out(g_config_path);
@@ -223,7 +222,7 @@ void parse_options(int argc, LPWSTR* wargv) {
     std::transform(std::begin(argv), std::end(argv), std::begin(rargv), [](const std::string& s) {
         return const_cast<char*>(s.c_str());
     });
-    auto raw_argv = rargv.data();
+    auto* raw_argv = rargv.data();
 
     cxxopts::Options options(g_unique_identifier, "");
     options.add_options()
@@ -376,7 +375,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
     return 0;
 }
 
-void mainLoop(HINSTANCE hInstance) {
+void main_loop(HINSTANCE hInstance) {
     load_config();
 
     WCHAR window_title[100];
@@ -384,7 +383,7 @@ void mainLoop(HINSTANCE hInstance) {
     HWND hwnd = CreateWindow(CHOOSE_TSTR(g_unique_identifier), window_title, WS_OVERLAPPEDWINDOW,
                              CW_USEDEFAULT, 0, 250, 200, NULL, NULL, g_hinst, nullptr);
     if (hwnd) {
-        auto powerNotify = g_enable_activity ? RegisterPowerSettingNotification(hwnd, &GUID_SESSION_USER_PRESENCE, DEVICE_NOTIFY_WINDOW_HANDLE) : nullptr;
+        auto* powerNotify = g_enable_activity ? RegisterPowerSettingNotification(hwnd, &GUID_SESSION_USER_PRESENCE, DEVICE_NOTIFY_WINDOW_HANDLE) : nullptr;
 
         ShowWindow(hwnd, SW_HIDE);
 
@@ -416,8 +415,6 @@ void mainLoop(HINSTANCE hInstance) {
                 }
             });
         }
-
-        mqtt.connect();
         
         std::atomic<bool> config_thread_signal = true;
         std::thread config_thread = std::thread([&config_thread_signal, hwnd]() {
@@ -434,8 +431,15 @@ void mainLoop(HINSTANCE hInstance) {
             }
         });
 
+        mqtt.connect();
+
         MSG msg;
         while (g_running) {
+            if(mqtt.status() == mqtt_status::DISCONNECTED) {
+                OutputDebugStringA("disconnected, shutting down.\n");
+                break;
+            }
+
             if (MsgWaitForMultipleObjects(0, nullptr, false, 1000, QS_ALLINPUT) == WAIT_OBJECT_0) {
                 while(PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
                     TranslateMessage(&msg);
@@ -483,7 +487,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int /*nCm
     while(g_restart) {
         g_running = true;
         g_restart = false;
-        mainLoop(hInstance);
+        main_loop(hInstance);
     }
 
     CoUninitialize();
