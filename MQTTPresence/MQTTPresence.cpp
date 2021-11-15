@@ -270,13 +270,21 @@ BOOL AddNotificationIcon(HWND hwnd) {
     return Shell_NotifyIcon(NIM_SETVERSION, &nid);
 }
 
+void SetNotificationIconTooltip(HWND hwnd, const TCHAR* msg) {
+    NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA) };
+    nid.hWnd = hwnd;
+    nid.uFlags = NIF_TIP | NIF_SHOWTIP;
+    nid.uID = IDI_NOTIFICATIONICON;
+    _tcscpy_s(nid.szTip, msg);
+
+    Shell_NotifyIcon(NIM_MODIFY, &nid);
+}
+
 void SetNotificationIconMessage(HWND hwnd, const TCHAR* msg) {
-    NOTIFYICONDATA nid = { NOTIFYICONDATA_V3_SIZE };
+    NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA) };
     nid.hWnd = hwnd;
     nid.uFlags = NIF_INFO;
     nid.uID = IDI_NOTIFICATIONICON;
-    nid.uCallbackMessage = WMAPP_NOTIFYCALLBACK;
-    nid.uTimeout = 5000;
     _tcscpy_s(nid.szInfo, msg);
     LoadString(g_hinst, IDS_TOOLTIP, nid.szInfoTitle, ARRAYSIZE(nid.szInfoTitle));
     
@@ -284,7 +292,7 @@ void SetNotificationIconMessage(HWND hwnd, const TCHAR* msg) {
 }
 
 BOOL DeleteNotificationIcon(HWND hwnd) {
-    NOTIFYICONDATA nid = {sizeof(nid)};
+    NOTIFYICONDATA nid = { sizeof(NOTIFYICONDATA) };
     nid.hWnd = hwnd;
     nid.uID = IDI_NOTIFICATIONICON;
     return Shell_NotifyIcon(NIM_DELETE, &nid);
@@ -433,10 +441,14 @@ void main_loop(HINSTANCE hInstance) {
 
         mqtt.connect();
 
+        bool last_sound_active = false;
+        bool last_user_active = false;
         MSG msg;
         while (g_running) {
             if(mqtt.status() == mqtt_status::DISCONNECTED) {
-                OutputDebugStringA("disconnected, shutting down.\n");
+                g_running = false;
+                g_restart = true;
+                SetNotificationIconMessage(hwnd, TEXT("Connection lost, reconnecting..."));
                 break;
             }
 
@@ -449,6 +461,15 @@ void main_loop(HINSTANCE hInstance) {
                         break;
                     }
                 }
+            }
+
+            if (last_sound_active != g_sound_active || last_user_active != g_user_active) {
+                last_sound_active = g_sound_active;
+                last_user_active = g_user_active;
+
+                auto notification = std::format(L"User active: {}\nSound active: {}", g_user_active, g_sound_active);
+
+                SetNotificationIconTooltip(hwnd, notification.c_str());
             }
         }
 
@@ -463,6 +484,11 @@ void main_loop(HINSTANCE hInstance) {
 
         if(g_enable_activity)
             UnregisterPowerSettingNotification(powerNotify);
+
+        if (g_mqtt) {
+            g_mqtt->sound_active(false);
+            g_mqtt->user_active(false);
+        }
 
         DestroyWindow(hwnd);
     }

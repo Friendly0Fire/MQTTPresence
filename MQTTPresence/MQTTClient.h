@@ -58,7 +58,7 @@ public:
     mqtt_client(std::string host, std::string port, std::string username,
                 std::string password, std::string topic)
         : host_(std::move(host)), port_(std::move(port)), username_(std::move(username)), password_(std::move(password)), topic_(std::move(topic)),
-          will_topic_(topic + "/inactive") {}
+          will_topic_(topic_ + "/inactive") {}
 
     ~mqtt_client() {
         if(!client_)
