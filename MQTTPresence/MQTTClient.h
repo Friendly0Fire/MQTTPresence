@@ -77,16 +77,37 @@ public:
 
         status_ = mqtt_status::DISCONNECTING;
 
+#ifdef _DEBUG
+        OutputDebugStringA("Disconnecting...\n");
+#endif
+
         if(periodic_.joinable())
             periodic_.join();
+
+#ifdef _DEBUG
+        OutputDebugStringA("Periodic thread joined...\n");
+#endif
         
         user_active(false);
         sound_active(false);
 
+#ifdef _DEBUG
+        OutputDebugStringA("Activity messages sent...\n");
+#endif
+
         client_->disconnect(1000)->wait();
+
+#ifdef _DEBUG
+        OutputDebugStringA("Disconnection processed...\n");
+#endif
+
         client_.reset();
 
         status_ = mqtt_status::DISCONNECTED;
+
+#ifdef _DEBUG
+        OutputDebugStringA("Client destroyed.\n");
+#endif
     }
 
     void connect() {
@@ -114,13 +135,15 @@ public:
             will_content_ = buf;
         }
 
-        mqtt::will_options willopts;
-        willopts.set_topic(will_topic_);
-        willopts.set_payload(will_content_);
-        willopts.set_retained(true);
-        willopts.set_qos(default_qos_);
+        {
+            mqtt::will_options willopts;
+            willopts.set_topic(will_topic_);
+            willopts.set_payload(will_content_);
+            willopts.set_retained(false);
+            willopts.set_qos(default_qos_);
 
-        connopts.set_will(willopts);
+            connopts.set_will(std::move(willopts));
+        }
 
         try {
             client_->connect(connopts)->wait();
@@ -160,7 +183,7 @@ public:
 
     void user_active(bool state) const {
         user_active_ = state;
-        if(status_ != mqtt_status::CONNECTED)
+        if(status_ == mqtt_status::DISCONNECTED)
             return;
 
 #ifdef _DEBUG
@@ -168,7 +191,7 @@ public:
 #endif
 
         try {
-            client_->publish(topic_ + "/user_active", state ? "true" : "false", default_qos_, false);
+            client_->publish(topic_ + "/user_active", state ? "true" : "false", default_qos_, false)->wait();
         } catch(const mqtt::exception& ex) {
 #ifdef _DEBUG
             OutputDebugStringA((std::string("failed: ") + ex.what() + "\n").c_str());
@@ -178,7 +201,7 @@ public:
 
     void sound_active(bool state) const {
         sound_active_ = state;
-        if(status_ != mqtt_status::CONNECTED)
+        if (status_ == mqtt_status::DISCONNECTED)
             return;
 
 #ifdef _DEBUG
@@ -186,7 +209,7 @@ public:
 #endif
 
         try {
-            client_->publish(topic_ + "/sound_active", state ? "true" : "false", default_qos_, false);
+            client_->publish(topic_ + "/sound_active", state ? "true" : "false", default_qos_, false)->wait();
         } catch(const mqtt::exception& ex) {
 #ifdef _DEBUG
             OutputDebugStringA((std::string("failed: ") + ex.what() + "\n").c_str());

@@ -362,8 +362,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
         DeleteNotificationIcon(hwnd);
         PostQuitMessage(0);
         break;
+    case WM_QUERYENDSESSION:
+        return true;
     case WM_ENDSESSION:
+        if (!wParam)
+            break;
+
         g_running = false;
+        g_restart = false;
         g_mqtt->disconnect();
         g_mqtt = nullptr;
         break;
