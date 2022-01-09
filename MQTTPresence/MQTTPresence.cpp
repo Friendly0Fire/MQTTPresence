@@ -495,7 +495,12 @@ void main_loop(HINSTANCE hInstance) {
 }
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR lpCmdLine, int /*nCmdShow*/) {
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (!SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)))
+    {
+        MessageBox(nullptr, TEXT("Could not initialize COM library!"), TEXT("Fatal Error"), MB_OK | MB_ICONERROR);
+        exit(1);
+    }
+
     GetModuleFileName(nullptr, g_program_path, MAX_PATH);
     g_hinst = hInstance;
     g_startup = get_startup();

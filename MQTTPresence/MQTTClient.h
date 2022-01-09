@@ -24,6 +24,8 @@ protected:
         EXACTLY_ONCE = 2
     };
 
+    const qos default_qos_ = qos::EXACTLY_ONCE;
+
     class result_callback : public virtual mqtt::iaction_listener {
     protected:
         using on_t = std::function<void(const mqtt::token& tok)>;
@@ -116,7 +118,7 @@ public:
         willopts.set_topic(will_topic_);
         willopts.set_payload(will_content_);
         willopts.set_retained(true);
-        willopts.set_qos(qos::AT_LEAST_ONCE);
+        willopts.set_qos(default_qos_);
 
         connopts.set_will(willopts);
 
@@ -145,7 +147,9 @@ public:
                 }
             });
         } catch(const mqtt::exception& ex) {
+#ifdef _DEBUG
             OutputDebugStringA((std::string("failed to connect: ") + ex.what() + "\n").c_str());
+#endif
             if(periodic_.joinable())
                 periodic_.join();
 
@@ -159,12 +163,16 @@ public:
         if(status_ != mqtt_status::CONNECTED)
             return;
 
+#ifdef _DEBUG
         OutputDebugStringA((std::string("user_active = ") + (state ? "true" : "false") + "\n").c_str());
+#endif
 
         try {
-            client_->publish(topic_ + "/user_active", state ? "true" : "false", qos::AT_LEAST_ONCE, true);
+            client_->publish(topic_ + "/user_active", state ? "true" : "false", default_qos_, false);
         } catch(const mqtt::exception& ex) {
+#ifdef _DEBUG
             OutputDebugStringA((std::string("failed: ") + ex.what() + "\n").c_str());
+#endif
         }
     }
 
@@ -173,12 +181,16 @@ public:
         if(status_ != mqtt_status::CONNECTED)
             return;
 
+#ifdef _DEBUG
         OutputDebugStringA((std::string("sound_active = ") + (state ? "true" : "false") + "\n").c_str());
+#endif
 
         try {
-            client_->publish(topic_ + "/sound_active", state ? "true" : "false", qos::AT_LEAST_ONCE, true);
+            client_->publish(topic_ + "/sound_active", state ? "true" : "false", default_qos_, false);
         } catch(const mqtt::exception& ex) {
+#ifdef _DEBUG
             OutputDebugStringA((std::string("failed: ") + ex.what() + "\n").c_str());
+#endif
         }
     }
 };
