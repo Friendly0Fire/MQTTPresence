@@ -171,10 +171,10 @@ void on_activity_change(activity_change_t changed, bool value)
         PROCESS_INFORMATION pinfo;
 
         for (const auto& p : g_start_processes) {
-            std::string tmp_cmdline = p.second;
+            std::string cmdline = std::format("\"{}\" {}", p.first, p.second);
             CreateProcessA(
-                p.first.c_str(),
-                tmp_cmdline.data(),
+                nullptr,
+                cmdline.data(),
                 nullptr,
                 nullptr,
                 false,
@@ -340,8 +340,10 @@ void load_config() {
                         for (const auto& element : proc.GetArray()) {
                             if (app.empty())
                                 app = element.GetString();
+                            else if (args.empty())
+                                args = element.GetString();
                             else
-                                args += element.GetString() + std::string(" ");
+                                args += std::string(" ") + element.GetString();
                         }
 
                         g_start_processes.push_back(std::make_pair(to_lower(app), args));
