@@ -5,6 +5,7 @@
 #include "Resource.h"
 #include <string>
 #include <codecvt>
+#include <algorithm>
 
 #define DEF_TSTR(name, val) \
     const char name[] = val; \
@@ -38,6 +39,14 @@ inline std::wstring s2ws(const std::string& str) {
     std::wstring_convert<convert_typeX, wchar_t> converterX;
 
     return converterX.from_bytes(str);
+}
+
+inline std::string to_lower(const std::string& str)
+{
+    std::string str2 = str;
+    std::transform(str2.begin(), str2.end(), str2.begin(),
+        [](unsigned char c) { return std::tolower(c); });
+    return str2;
 }
 
 DEF_TSTR(g_unique_identifier, "MQTTPresenceWindows");

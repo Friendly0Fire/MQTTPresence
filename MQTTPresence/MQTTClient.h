@@ -9,6 +9,9 @@
 #include "MQTTPresence.h"
 #include <mqtt/client.h>
 
+extern bool g_user_active;
+extern bool g_sound_active;
+
 enum class mqtt_status {
     DISCONNECTED = 0,
     CONNECTED = 1,
@@ -52,8 +55,6 @@ protected:
     std::thread periodic_;
     mqtt::async_client_ptr client_;
     std::atomic<mqtt_status> status_ = mqtt_status::DISCONNECTED;
-    mutable bool user_active_ = true;
-    mutable bool sound_active_ = false;
 
 public:
 
@@ -161,8 +162,8 @@ public:
                     if(i >= periodic_interval_) {
                         i = 0;
 
-                        user_active(user_active_);
-                        sound_active(sound_active_);
+                        user_active();
+                        sound_active();
                     }
 
                     i++;
@@ -181,8 +182,7 @@ public:
         }
     }
 
-    void user_active(bool state) const {
-        user_active_ = state;
+    void user_active(bool state = g_user_active) const {
         if(status_ == mqtt_status::DISCONNECTED)
             return;
 
@@ -199,8 +199,7 @@ public:
         }
     }
 
-    void sound_active(bool state) const {
-        sound_active_ = state;
+    void sound_active(bool state = g_sound_active) const {
         if (status_ == mqtt_status::DISCONNECTED)
             return;
 

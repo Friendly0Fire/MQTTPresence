@@ -5,12 +5,14 @@
 #include <strsafe.h>
 #include <Shlobj.h>
 #include <Shlwapi.h>
+#include <Psapi.h>
 
 #include "MQTTPresence.h"
 #include "MQTTClient.h"
 
 #include <fstream>
 #include <vector>
+#include <filesystem>
 
 #include <rapidjson/document.h>
 #include <rapidjson/istreamwrapper.h>
@@ -41,17 +43,23 @@ TCHAR g_config_path[MAX_PATH];
 HANDLE g_config_watch;
 std::string g_mqtt_host, g_mqtt_port, g_mqtt_topic, g_mqtt_username, g_mqtt_password;
 std::vector<std::string> g_volume_processes;
+std::vector<std::pair<std::string, std::string>> g_start_processes;
+std::vector<std::string> g_kill_processes;
 bool g_enable_volume = true, g_enable_activity = true;
 bool g_volume_check_all_devices = false;
 
-bool g_user_active = true, g_sound_active = false;
-
+bool g_user_active = false, g_sound_active = false;
 
 template <typename... Args>
 void fatal_message_box(Args&&... args) {
     MessageBox(std::forward<Args>(args)...);
     exit(1);
 }
+
+enum class activity_change_t {
+    USER_ACTIVE,
+    SOUND_ACTIVE
+};
 
 enum class elevated_commands_t {
     SET_STARTUP_ON = 1,
@@ -109,6 +117,133 @@ void launch_elevated(elevated_commands_t cmds) {
 
     if(exit_code != 0)
         throw errcode_exception(exit_code);
+}
+
+enum class activity_change_result_t
+{
+    INACTIVE = -1,
+    NO_CHANGE = 0,
+    ACTIVE = 1
+};
+
+void on_activity_change(activity_change_t changed, bool value)
+{
+    // If the "change" didn't change the values, exit immediately
+    if (changed == activity_change_t::SOUND_ACTIVE && value == g_sound_active
+     || changed == activity_change_t::USER_ACTIVE  && value == g_user_active)
+        return;
+
+    activity_change_result_t change = activity_change_result_t::NO_CHANGE;
+    if (changed == activity_change_t::SOUND_ACTIVE)
+    {
+        g_sound_active = value;
+
+        // If sound is now active and user is not, we just activated
+        if (g_sound_active && !g_user_active)
+            change = activity_change_result_t::ACTIVE;
+        // If sound is now inactive and user already was not, we just deactivated
+        else if (!g_sound_active && !g_user_active)
+            change = activity_change_result_t::INACTIVE;
+
+        g_mqtt->sound_active();
+    }
+    else if (changed == activity_change_t::USER_ACTIVE)
+    {
+        g_user_active = value;
+
+        // If user is now active and sound is not, we just activated
+        if (g_user_active && !g_sound_active)
+            change = activity_change_result_t::ACTIVE;
+        // If user is now inactive and sound already was not, we just deactivated
+        else if (!g_user_active && !g_sound_active)
+            change = activity_change_result_t::INACTIVE;
+
+        g_mqtt->user_active();
+    }
+
+    if (!g_start_processes.empty() && change == activity_change_result_t::ACTIVE)
+    {
+        STARTUPINFOA startupinfo;
+        ZeroMemory(&startupinfo, sizeof(STARTUPINFOA));
+        startupinfo.cb = sizeof(STARTUPINFOA);
+        startupinfo.dwFlags = STARTF_USESHOWWINDOW;
+        startupinfo.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION pinfo;
+
+        for (const auto& p : g_start_processes) {
+            std::string tmp_cmdline = p.second;
+            CreateProcessA(
+                p.first.c_str(),
+                tmp_cmdline.data(),
+                nullptr,
+                nullptr,
+                false,
+                0,
+                nullptr,
+                std::filesystem::path(p.first).parent_path().string().c_str(),
+                &startupinfo,
+                &pinfo
+            );
+        }
+    }
+    else if(!g_kill_processes.empty() && change == activity_change_result_t::INACTIVE)
+    {
+        std::map<DWORD, std::list<HWND>> proc_window_map;
+        auto cb = [](HWND hwnd, LPARAM map_) -> BOOL {
+            auto& map = *reinterpret_cast<decltype(proc_window_map)*>(map_);
+
+            DWORD pid;
+            GetWindowThreadProcessId(hwnd, &pid);
+            map[pid].push_back(hwnd);
+
+            return true;
+        };
+        EnumWindows(cb, reinterpret_cast<LPARAM>(&proc_window_map));
+
+        const size_t max_proc_ids = 1024;
+        DWORD proc_list[max_proc_ids];
+        DWORD proc_size;
+        if (EnumProcesses(proc_list, sizeof(proc_list), &proc_size))
+        {
+            size_t proc_count = proc_size / sizeof(DWORD);
+            for (size_t i = 0; i < proc_count; i++)
+            {
+                HANDLE proc = OpenProcess(PROCESS_ALL_ACCESS, false, proc_list[i]);
+                if (!proc)
+                    continue;
+
+                char proc_path[MAX_PATH];
+                DWORD proc_path_size = MAX_PATH;
+                if (!QueryFullProcessImageNameA(proc, 0, proc_path, &proc_path_size))
+                {
+                    CloseHandle(proc);
+                    continue;
+                }
+
+                auto proc_fname = to_lower(std::filesystem::path(proc_path).filename().string());
+
+                if (std::find(g_kill_processes.begin(), g_kill_processes.end(), proc_fname) == g_kill_processes.end())
+                    continue;
+
+                if (proc_window_map.count(proc_list[i]) > 0)
+                {
+                    const auto& windows = proc_window_map[proc_list[i]];
+
+                    for (auto& hwnd : windows)
+                        SendMessageTimeout(hwnd, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG, 1000, nullptr);
+
+                    DWORD rval = WaitForSingleObject(proc, 1000);
+                    if (rval == WAIT_OBJECT_0) {
+                        CloseHandle(proc);
+                        continue;
+                    }
+                }
+
+                TerminateProcess(proc, 0);
+                CloseHandle(proc);
+            }
+        }
+    }
 }
 
 bool get_startup() {
@@ -172,12 +307,45 @@ void load_config() {
         g_mqtt_username = load_val("mqttUsername", "");
         g_mqtt_password = load_val("mqttPassword", "");
 
-        if(doc.HasMember("volumeProcesses")) {
+        if (doc.HasMember("volumeProcesses")) {
             const auto& processes = doc["volumeProcesses"];
-            if(processes.IsArray()) {
-                for(const auto& proc : processes.GetArray()) {
-                    if(proc.IsString())
+            if (processes.IsArray()) {
+                for (const auto& proc : processes.GetArray()) {
+                    if (proc.IsString())
                         g_volume_processes.push_back(proc.GetString());
+                }
+            }
+        }
+
+        if (doc.HasMember("killProcesses")) {
+            const auto& processes = doc["killProcesses"];
+            if (processes.IsArray()) {
+                for (const auto& proc : processes.GetArray()) {
+                    if (proc.IsString())
+                        g_kill_processes.push_back(to_lower(proc.GetString()));
+                }
+            }
+        }
+
+        if (doc.HasMember("startProcesses")) {
+            const auto& processes = doc["startProcesses"];
+            if (processes.IsArray()) {
+                for (const auto& proc : processes.GetArray()) {
+                    if (proc.IsString())
+                        g_start_processes.push_back(std::make_pair(to_lower(proc.GetString()), std::string()));
+                    else if (proc.IsArray())
+                    {
+                        std::string app;
+                        std::string args;
+                        for (const auto& element : proc.GetArray()) {
+                            if (app.empty())
+                                app = element.GetString();
+                            else
+                                args += element.GetString() + std::string(" ");
+                        }
+
+                        g_start_processes.push_back(std::make_pair(to_lower(app), args));
+                    }
                 }
             }
         }
@@ -203,7 +371,9 @@ void load_config() {
     "enableVolumeCheck": true, // defaults to true
     "volumeProcesses": [], // if empty, all processes are checked; otherwise, only check a list of executables (with extensions)
     "enableActivityCheck": true, // defaults to true
-    "enableVolumeCheckAllDevices": false // defaults to false; if true, all audio output devices are checked for sound output, otherwise only the default one is
+    "enableVolumeCheckAllDevices": false, // defaults to false; if true, all audio output devices are checked for sound output, otherwise only the default one is
+    "killProcesses": [], // if all presence checks indicate away, kill these executables (with extensions)
+    "startProcesses": [] // if any presence check indicates present, start these processes (provide full paths as strings, or optionally arrays with the path as the first element and any arguments to pass as further elements)
 }
 )MARK";
         out.close();
@@ -377,10 +547,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
         if(wParam == PBT_POWERSETTINGCHANGE) {
             auto data = reinterpret_cast<POWERBROADCAST_SETTING*>(lParam);
             bool new_active = *reinterpret_cast<DWORD*>(&data->Data) != PowerUserInactive;
-            if(new_active != g_user_active) {
-                g_user_active = new_active;
-                g_mqtt->user_active(g_user_active);
-            }
+            on_activity_change(activity_change_t::USER_ACTIVE, new_active);
         }
     } break;
     default:
@@ -420,11 +587,7 @@ void main_loop(HINSTANCE hInstance) {
 
                 while(volume_thread_signal) {
                     bool new_active = volume.poll();
-                    if(new_active != g_sound_active) {
-                        g_sound_active = new_active;
-                        if(g_mqtt)
-                            g_mqtt->sound_active(g_sound_active);
-                    }
+                    on_activity_change(activity_change_t::SOUND_ACTIVE, new_active);
                     std::this_thread::sleep_for(5s);
                 }
             });
@@ -446,6 +609,11 @@ void main_loop(HINSTANCE hInstance) {
         });
 
         mqtt.connect();
+
+        if (g_enable_activity)
+            on_activity_change(activity_change_t::USER_ACTIVE, true);
+        if(g_enable_volume)
+            on_activity_change(activity_change_t::SOUND_ACTIVE, false);
 
         bool last_sound_active = false;
         bool last_user_active = false;
@@ -495,6 +663,9 @@ void main_loop(HINSTANCE hInstance) {
             g_mqtt->sound_active(false);
             g_mqtt->user_active(false);
         }
+
+        on_activity_change(activity_change_t::SOUND_ACTIVE, false);
+        on_activity_change(activity_change_t::USER_ACTIVE, false);
 
         DestroyWindow(hwnd);
     }
