@@ -587,9 +587,17 @@ void main_loop(HINSTANCE hInstance) {
                 using namespace std::chrono_literals;
                 std::this_thread::sleep_for(5s);
 
+                int no_sound_ticks = 0;
+
                 while(volume_thread_signal) {
                     bool new_active = volume.poll();
-                    on_activity_change(activity_change_t::SOUND_ACTIVE, new_active);
+                    if (!new_active)
+                        no_sound_ticks++;
+                    else
+                        no_sound_ticks = 0;
+
+                    if(new_active || no_sound_ticks > 10)
+                        on_activity_change(activity_change_t::SOUND_ACTIVE, new_active);
                     std::this_thread::sleep_for(5s);
                 }
             });
