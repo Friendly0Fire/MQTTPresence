@@ -14,8 +14,7 @@
 #include <vector>
 #include <filesystem>
 
-#include <rapidjson/document.h>
-#include <rapidjson/istreamwrapper.h>
+#include <nlohmann/json.hpp>
 #include <cxxopts.hpp>
 
 #include "Registry.h"
@@ -289,61 +288,54 @@ void load_config() {
     PathAppend(g_config_path, TEXT("config.json"));
 
     if (PathFileExists(g_config_path)) {
-        std::ifstream config(g_config_path);
-        rapidjson::IStreamWrapper config_isw(config);
-        rapidjson::Document doc;
-        doc.ParseStream(config_isw);
 
-        auto load_val = [&](const char* name, const std::string& def) {
-            if(doc.HasMember(name) && doc[name].IsString())
-                return std::string(doc[name].GetString());
-            else
-                return def;
-        };
+        std::ifstream cfg_file(g_config_path);
+        nlohmann::json cfg;
+        cfg_file >> cfg;
 
-        g_mqtt_host = load_val("mqttHost", "localhost");
-        g_mqtt_port = load_val("mqttPort", "1883");
-        g_mqtt_topic = load_val("mqttTopic", "winmqttpresence");
-        g_mqtt_username = load_val("mqttUsername", "");
-        g_mqtt_password = load_val("mqttPassword", "");
+        g_mqtt_host = cfg.value("mqttHost", "localhost");
+        g_mqtt_port = cfg.value("mqttPort", "1883");
+        g_mqtt_topic = cfg.value("mqttTopic", "winmqttpresence");
+        g_mqtt_username = cfg.value("mqttUsername", "");
+        g_mqtt_password = cfg.value("mqttPassword", "");
 
-        if (doc.HasMember("volumeProcesses")) {
-            const auto& processes = doc["volumeProcesses"];
-            if (processes.IsArray()) {
-                for (const auto& proc : processes.GetArray()) {
-                    if (proc.IsString())
-                        g_volume_processes.push_back(proc.GetString());
+        if (cfg.contains("volumeProcesses")) {
+            const auto& processes = cfg["volumeProcesses"];
+            if (processes.is_array()) {
+                for (const auto& proc : processes) {
+                    if (proc.is_string())
+                        g_volume_processes.push_back(proc);
                 }
             }
         }
 
-        if (doc.HasMember("killProcesses")) {
-            const auto& processes = doc["killProcesses"];
-            if (processes.IsArray()) {
-                for (const auto& proc : processes.GetArray()) {
-                    if (proc.IsString())
-                        g_kill_processes.push_back(to_lower(proc.GetString()));
+        if (cfg.contains("killProcesses")) {
+            const auto& processes = cfg["killProcesses"];
+            if (processes.is_array()) {
+                for (const auto& proc : processes) {
+                    if (proc.is_string())
+                        g_kill_processes.push_back(to_lower(proc));
                 }
             }
         }
 
-        if (doc.HasMember("startProcesses")) {
-            const auto& processes = doc["startProcesses"];
-            if (processes.IsArray()) {
-                for (const auto& proc : processes.GetArray()) {
-                    if (proc.IsString())
-                        g_start_processes.push_back(std::make_pair(to_lower(proc.GetString()), std::string()));
-                    else if (proc.IsArray())
+        if (cfg.contains("startProcesses")) {
+            const auto& processes = cfg["startProcesses"];
+            if (processes.is_array()) {
+                for (const auto& proc : processes) {
+                    if (proc.is_string())
+                        g_start_processes.push_back(std::make_pair(to_lower(proc), std::string()));
+                    else if (proc.is_array())
                     {
                         std::string app;
                         std::string args;
-                        for (const auto& element : proc.GetArray()) {
+                        for (const auto& element : proc) {
                             if (app.empty())
-                                app = element.GetString();
+                                app = element;
                             else if (args.empty())
-                                args = element.GetString();
+                                args = element;
                             else
-                                args += std::string(" ") + element.GetString();
+                                args += " " + element.get<std::string>();
                         }
 
                         g_start_processes.push_back(std::make_pair(to_lower(app), args));
@@ -351,14 +343,10 @@ void load_config() {
                 }
             }
         }
-
-        auto load_bool = [&](const char* name, bool def) {
-            return load_val(name, def ? "true" : "false") == "true";
-        };
         
-        g_enable_volume = load_bool("enableVolumeCheck", true);
-        g_enable_activity = load_bool("enableActivityCheck", true);
-        g_volume_check_all_devices = load_bool("enableVolumeCheckAllDevices", false);
+        g_enable_volume = cfg.value("enableVolumeCheck", true);
+        g_enable_activity = cfg.value("enableActivityCheck", true);
+        g_volume_check_all_devices = cfg.value("enableVolumeCheckAllDevices", false);
     }
     else {
         std::ofstream out(g_config_path);

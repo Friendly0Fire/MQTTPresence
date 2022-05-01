@@ -55,4 +55,9 @@
   <ItemGroup>
     <Manifest Include="DeclareDPIAware.manifest" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="vcpkg.json">
+      <Filter>Resource Files</Filter>
+    </None>
+  </ItemGroup>
 </Project>

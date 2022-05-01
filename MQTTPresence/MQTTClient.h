@@ -50,18 +50,26 @@ protected:
 
     const int periodic_interval_ = 10;
 
-    const std::string host_, port_, username_, password_, topic_, will_topic_;
+    const std::string host_, port_, username_, password_, devicename_;
     std::string will_content_;
     std::thread periodic_;
     mqtt::async_client_ptr client_;
     std::atomic<mqtt_status> status_ = mqtt_status::DISCONNECTED;
 
+    std::string base_topic() const { return "homeassistant/binary_sensor/" + devicename_; }
+
+    void broadcast_home_assistant_config(const std::string& name) {
+	    
+        auto ha_cfg = base_topic() + "_" + name + "/config";
+        auto ha_cfg_contents = "{\"name\": \"" + devicename_ + "_" + name + "\", \"device_class\": \"presence\", \"state_topic\": \"" + base_topic() + "_" + name + "/state\"}";
+        client_->publish(ha_cfg.c_str(), ha_cfg_contents.c_str(), ha_cfg_contents.size(), default_qos_, true);
+    }
+
 public:
 
     mqtt_client(std::string host, std::string port, std::string username,
-                std::string password, std::string topic)
-        : host_(std::move(host)), port_(std::move(port)), username_(std::move(username)), password_(std::move(password)), topic_(std::move(topic)),
-          will_topic_(topic_ + "/inactive") {}
+                std::string password, std::string devicename)
+        : host_(std::move(host)), port_(std::move(port)), username_(std::move(username)), password_(std::move(password)), devicename_(std::move(devicename)) {}
 
     ~mqtt_client() {
         if(!client_)
@@ -95,8 +103,16 @@ public:
 #ifdef _DEBUG
         OutputDebugStringA("Activity messages sent...\n");
 #endif
-
-        client_->disconnect(1000)->wait();
+        try
+        {
+            client_->disconnect(1000)->wait();
+        }
+        catch (mqtt::exception ex)
+        {
+#ifdef _DEBUG
+            OutputDebugStringA(std::format("Disconnect exception: {}", ex.to_string().c_str()).c_str());
+#endif
+        }
 
 #ifdef _DEBUG
         OutputDebugStringA("Disconnection processed...\n");
@@ -129,17 +145,9 @@ public:
         connopts.set_automatic_reconnect(1000, 30000);
 
         {
-            auto now = std::chrono::system_clock::now();
-            auto now_time_t = std::chrono::system_clock::to_time_t(now);
-            char buf[1024];
-            ctime_s(buf, sizeof(buf), &now_time_t);
-            will_content_ = buf;
-        }
-
-        {
             mqtt::will_options willopts;
-            willopts.set_topic(will_topic_);
-            willopts.set_payload(will_content_);
+            willopts.set_topic(base_topic() + "_disconnected/state");
+            willopts.set_payload(mqtt::string("true"));
             willopts.set_retained(false);
             willopts.set_qos(default_qos_);
 
@@ -148,8 +156,12 @@ public:
 
         try {
             client_->connect(connopts)->wait();
-
             status_ = mqtt_status::CONNECTED;
+            
+            broadcast_home_assistant_config("user");
+            broadcast_home_assistant_config("sound");
+            broadcast_home_assistant_config("disconnected");
+            client_->publish(base_topic() + "_disconnected/state", mqtt::string("false"), qos::EXACTLY_ONCE, true);
 
             user_active(true);
             sound_active(false);
@@ -191,7 +203,7 @@ public:
 #endif
 
         try {
-            client_->publish(topic_ + "/user_active", state ? "true" : "false", default_qos_, false)->wait();
+            client_->publish(base_topic() + "_user/state", state ? "ON" : "OFF", default_qos_, false)->wait();
         } catch(const mqtt::exception& ex) {
 #ifdef _DEBUG
             OutputDebugStringA((std::string("failed: ") + ex.what() + "\n").c_str());
@@ -208,7 +220,7 @@ public:
 #endif
 
         try {
-            client_->publish(topic_ + "/sound_active", state ? "true" : "false", default_qos_, false)->wait();
+            client_->publish(base_topic() + "_sound/state", state ? "ON" : "OFF", default_qos_, false)->wait();
         } catch(const mqtt::exception& ex) {
 #ifdef _DEBUG
             OutputDebugStringA((std::string("failed: ") + ex.what() + "\n").c_str());

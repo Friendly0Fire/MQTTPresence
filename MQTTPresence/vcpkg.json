@@ -1,0 +1,10 @@
+{
+    "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
+    "name": "winmqttpresence",
+    "version": "0.0.1",
+    "dependencies": [
+      "cxxopts",
+      "nlohmann-json",
+      "paho-mqttpp3"
+    ]
+  }
