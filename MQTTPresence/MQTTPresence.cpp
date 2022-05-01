@@ -294,7 +294,7 @@ void load_config() {
         cfg_file >> cfg;
 
         g_mqtt_host = cfg.value("mqttHost", "localhost");
-        g_mqtt_port = cfg.value("mqttPort", "1883");
+        g_mqtt_port = std::to_string(cfg.value("mqttPort", 1883));
         g_mqtt_topic = cfg.value("mqttTopic", "winmqttpresence");
         g_mqtt_username = cfg.value("mqttUsername", "");
         g_mqtt_password = cfg.value("mqttPassword", "");
