@@ -58,10 +58,18 @@ protected:
 
     std::string base_topic() const { return "homeassistant/binary_sensor/" + devicename_; }
 
-    void broadcast_home_assistant_config(const std::string& name) {
+    void broadcast_home_assistant_config(const std::string& name, const char* device_class) {
 	    
-        auto ha_cfg = base_topic() + "_" + name + "/config";
-        auto ha_cfg_contents = "{\"name\": \"" + devicename_ + "_" + name + "\", \"device_class\": \"presence\", \"state_topic\": \"" + base_topic() + "_" + name + "/state\"}";
+        auto ha_cfg = base_topic() + "/" + name + "/config";
+        auto ha_cfg_contents = std::format(R"MARK(
+{{
+	"name": "{1} {0}",
+	"dev_cla": "{3}",
+	"stat_t": "{2}/{0}/state",
+	"device": {{ "identifiers": ["{1}"], "name": "{1}", "manufacturer": "Friendly0Fire", "model": "mqttpresence", "sw_version": "0.0.1" }},
+	"unique_id": "{1}_{0}"
+}}
+    )MARK", name, devicename_, base_topic(), device_class);
         client_->publish(ha_cfg.c_str(), ha_cfg_contents.c_str(), ha_cfg_contents.size(), default_qos_, true);
     }
 
@@ -146,8 +154,8 @@ public:
 
         {
             mqtt::will_options willopts;
-            willopts.set_topic(base_topic() + "_disconnected/state");
-            willopts.set_payload(mqtt::string("true"));
+            willopts.set_topic(base_topic() + "/disconnected/state");
+            willopts.set_payload(mqtt::string("ON"));
             willopts.set_retained(false);
             willopts.set_qos(default_qos_);
 
@@ -158,10 +166,10 @@ public:
             client_->connect(connopts)->wait();
             status_ = mqtt_status::CONNECTED;
             
-            broadcast_home_assistant_config("user");
-            broadcast_home_assistant_config("sound");
-            broadcast_home_assistant_config("disconnected");
-            client_->publish(base_topic() + "_disconnected/state", mqtt::string("false"), qos::EXACTLY_ONCE, true);
+            broadcast_home_assistant_config("user", "presence");
+            broadcast_home_assistant_config("sound", "sound");
+            broadcast_home_assistant_config("disconnected", "problem");
+            client_->publish(base_topic() + "/disconnected/state", mqtt::string("OFF"), qos::EXACTLY_ONCE, true);
 
             user_active(true);
             sound_active(false);
@@ -203,7 +211,7 @@ public:
 #endif
 
         try {
-            client_->publish(base_topic() + "_user/state", state ? "ON" : "OFF", default_qos_, false)->wait();
+            client_->publish(base_topic() + "/user/state", state ? "ON" : "OFF", default_qos_, false)->wait();
         } catch(const mqtt::exception& ex) {
 #ifdef _DEBUG
             OutputDebugStringA((std::string("failed: ") + ex.what() + "\n").c_str());
@@ -220,7 +228,7 @@ public:
 #endif
 
         try {
-            client_->publish(base_topic() + "_sound/state", state ? "ON" : "OFF", default_qos_, false)->wait();
+            client_->publish(base_topic() + "/sound/state", state ? "ON" : "OFF", default_qos_, false)->wait();
         } catch(const mqtt::exception& ex) {
 #ifdef _DEBUG
             OutputDebugStringA((std::string("failed: ") + ex.what() + "\n").c_str());
